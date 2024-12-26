@@ -1,0 +1,22 @@
+# Core Dependencies
+fastapi         # FastAPI for building the microservice
+uvicorn         # ASGI server for serving the FastAPI app
+faiss-cpu       # Faiss library for vector similarity search (CPU version)
+pydantic        # Data validation and settings management
+
+# Testing Dependencies
+pytest          # Testing framework
+httpx           # HTTP client for testing FastAPI endpoints
+
+# Optional: Logging and Utilities
+loguru          # For better logging
+
+# Async Database (Optional, for extending to include metadata)
+databases       # Database access (if needed in the future)
+psycopg2-binary # PostgreSQL driver (if extending with PostgreSQL)
+
+# Weaviate (For future use with Weaviate backend)
+weaviate-client
+
+# Explicit dependency versions to resolve conflicts
+numpy<2,>=1.22.4
