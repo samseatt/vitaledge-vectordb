@@ -2,7 +2,7 @@
 # Handles vector similarity searches.
 from fastapi import APIRouter, HTTPException
 from app.models.search_vectors_request import SearchVectorsRequest
-from app.services.vectordb import FaissService
+from app.core.db_init import initialize_vectordb_service
 import numpy as np
 import logging
 
@@ -11,49 +11,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-faiss_service = FaissService()
+# Create and initialize the vectordb service
+vectordb_service = initialize_vectordb_service()
 
 @router.post("/search")
 async def search_vectors(data: SearchVectorsRequest):
     """
     Perform a similarity search in the vector database.
     """
-    logger.debug(f"search_vectors called")
-    if len(data.query_vector) != faiss_service.faiss_db.embedding_dim:
-        raise HTTPException(status_code=400, detail="Embedding dimension mismatch")
+    try:
+        logger.debug(f"search_vectors called")
 
-    query_vector = np.array([data.query_vector], dtype=np.float32)
-    results = faiss_service.search_vectors(query_vector, data.top_k)
-    logger.debug(f"search_vector route returning results: {results}")
+        # Validate the embedding dimension
+        if len(data.query_vector) != vectordb_service.faiss_db.embedding_dim:
+            raise HTTPException(status_code=400, detail="Embedding dimension mismatch")
 
-    return {"results": [{"id": int(idx), "score": float(dist), "text": text} for idx, dist, text in results]}
+        # Search vectors
+        raw_results = vectordb_service.search_vectors(data.query_vector, data.top_k)
 
+        # Convert results to JSON-serializable format
+        results = [
+            {
+                "id": int(result["id"]),
+                "distance": float(result["distance"]),
+                "metadata": result["metadata"]
+            }
+            for result in raw_results
+        ]
 
-
-# from fastapi import APIRouter, HTTPException
-# from typing import List
-# from pydantic import BaseModel
-# from app.core.faiss_db import FaissDB
-# from app.core.config import config
-
-# import numpy as np
-
-# router = APIRouter()
-
-# class EmbeddingsRequest(BaseModel):
-#     query_embedding: List[float]
-#     top_k: int = 5
-
-# # Load FaissDB
-# faiss_db = FaissDB(config.VECTOR_DB_PATH, config.EMBEDDING_DIM)
-
-# @router.post("/search")
-# async def search_vectors(request: EmbeddingsRequest):
-#     print(f"search_vectors called")
-#     if len(request.query_embedding) != config.EMBEDDING_DIM:
-#         raise HTTPException(status_code=400, detail="Embedding dimension mismatch")
-    
-#     query_embedding_np = np.array([request.query_embedding], dtype=np.float32)
-#     results = faiss_db.search(query_embedding_np, request.top_k)
-
-#     return {"results": [{"id": int(idx), "score": float(dist)} for idx, dist in results]}
+        return {"results": results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

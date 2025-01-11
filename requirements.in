@@ -3,6 +3,7 @@ fastapi         # FastAPI for building the microservice
 uvicorn         # ASGI server for serving the FastAPI app
 faiss-cpu       # Faiss library for vector similarity search (CPU version)
 pydantic        # Data validation and settings management
+pydantic-settings
 
 # Testing Dependencies
 pytest          # Testing framework

@@ -4,249 +4,259 @@ Module: app.core
 
 Description:
 ------------
-This module defines the `FaissDB` class, which provides a low-level interface
-for directly interacting with the FAISS vector database. It is responsible for
-managing the lifecycle of the FAISS index, including its creation, loading,
-saving, and performing vector operations like addition and searching.
+This module defines the `FaissDB` class, a wrapper around the FAISS vector indexing library. 
+It provides an interface for managing the lifecycle of FAISS indexes and performing key vector 
+operations such as addition, searching, and deletion of embeddings. 
+
+The `FaissDB` class utilizes the `IndexFlatL2` type, which implements a simple flat index with 
+Euclidean (L2) distance as the similarity metric. This ensures straightforward indexing and 
+retrieval of vector embeddings while avoiding the added complexity of mapped IDs.
 
 Responsibilities:
 -----------------
-- Manage the FAISS index lifecycle:
-  - Create a new index when none exists.
+- Manage the lifecycle of the FAISS index:
+  - Create a new flat index if none exists.
   - Load an existing index from a file.
-  - Save the current state of the index to a file.
-- Add embeddings and IDs to the FAISS index.
-- Search the FAISS index for similar vectors based on query embeddings.
-- Provide low-level vector database functionality for higher-level services.
+  - Persist the index to disk after updates.
+- Perform vector operations:
+  - Add embeddings to the index.
+  - Search for nearest neighbors given a query embedding.
+  - Retrieve the total number of vectors stored in the index.
+  - Optionally delete specific embeddings if supported.
+- Provide a foundation for higher-level services to interact with the vector database.
 
 Dependencies:
 -------------
-- `faiss`: The FAISS library for managing vector operations.
-- `numpy`: For handling numerical operations and embedding data.
-- `app.core.config`: Provides configuration values like embedding dimension and
-  index file path.
+- `faiss`: The FAISS library for high-performance similarity search and clustering.
+- `numpy`: For numerical operations and embedding data management.
+- `os`: To manage file system operations for loading and saving the index.
+- `logging`: For logging actions and errors during vector operations.
 
 Usage:
 ------
-This module is typically used by higher-level services like `FaissService` to
-interact with the FAISS vector database.
+The `FaissDB` class is primarily used by higher-level services, such as `VectorDBService`, 
+to manage embeddings and facilitate search operations in a RAG (Retrieval-Augmented Generation) pipeline.
 
 Classes:
 --------
-- `FaissDB`: Handles direct FAISS operations like adding embeddings, searching
-  vectors, and saving/loading the index.
+- `FaissDB`: Encapsulates the FAISS index and provides high-level methods for managing embeddings.
 
-Functions:
-----------
-This module does not define standalone functions; all operations are encapsulated
-in the `FaissDB` class.
+Methods:
+--------
+- `add_vector`: Add a single embedding to the FAISS index.
+- `add_vectors`: Bulk insertion of multiple embeddings.
+- `search_vectors`: Perform similarity search to retrieve the top K most similar embeddings.
+- `get_vector_count`: Return the total number of vectors in the index.
+- `save_index`: Persist the index to a file.
+- `load_or_create_index`: Initialize the index from disk or create a new one.
+- `delete_vector`: (Optional) Delete a vector by its ID if supported.
+- `get_all_vectors`: Retrieve all vector IDs from the FAISS index.
 
 Example:
 --------
-db = FaissDB(index_path="./data/faiss_index", embedding_dim=384)
-db.add_embeddings(embeddings=np.array([[0.1, 0.2, 0.3]], dtype=np.float32), ids=[1])
-results = db.search(query_embedding=np.array([[0.1, 0.2, 0.3]], dtype=np.float32), top_k=5)
+db = FaissDB(vector_db_path="./data/faiss_index", embedding_dim=384)
+
+# Adding a single embedding
+embedding = np.array([0.1, 0.2, 0.3, ...], dtype=np.float32)
+db.add_vector(embedding)
+
+# Searching for the top 5 nearest neighbors
+query_embedding = np.array([0.1, 0.2, 0.3, ...], dtype=np.float32)
+distances, indices = db.search_vectors(query_embedding, top_k=5)
+
+Design Considerations:
+----------------------
+- **Flat Index Simplicity**:
+  - The use of `IndexFlatL2` ensures simplicity and efficiency, particularly for straightforward 
+    RAG workflows. More advanced FAISS configurations (e.g., `IndexIDMap`) are deliberately avoided 
+    to minimize operational complexity.
+- **Disk Persistence**:
+  - The index is saved to disk after every update, ensuring resilience against data loss.
+- **Decoupling from Metadata**:
+  - This class focuses exclusively on managing embeddings and their operations, leaving metadata 
+    management to complementary modules like `SQLiteDB`.
 
 Key Concepts:
 -------------
-- `IndexFlatL2`: A FAISS index type that uses the L2 (Euclidean) distance for
-  similarity search.
-- `IndexIDMap`: A wrapper around the FAISS index to allow mapping between vector
-  embeddings and unique IDs.
-- `Embedding Dimension`: The size of the embedding vectors. Must match across
-  all vectors in the database.
+- **IndexFlatL2**: A FAISS index type that stores embeddings in a flat array and uses L2 distance 
+  for similarity search.
+- **Embedding Dimension**: The size of each embedding vector. Must remain consistent across the index.
+- **RAG Pipelines**: Retrieval-Augmented Generation pipelines that depend on efficient vector 
+  search capabilities provided by this module.
+
+Author:
+-------
+Sam Seatt
+
+Date:
+-----
+2025-01-10
 
 """
-
 import faiss
-import numpy as np
-import pickle
-from typing import List, Tuple
+import os
 import logging
+import numpy as np
 
-# Logger for this file
 logger = logging.getLogger(__name__)
 
 class FaissDB:
-    def __init__(self, index_path="./data/faiss_index", embedding_dim=384):
-        self.index_path = index_path
+    def __init__(self, vector_db_path: str, embedding_dim: int):
+        """
+        Initialize the FaissDB class.
+
+        Args:
+            vector_db_path (str): Path to the Faiss index file.
+            embedding_dim (int): Dimensionality of the embeddings.
+        """
+        self.vector_db_path = vector_db_path
         self.embedding_dim = embedding_dim
-        self.index = self._load_index()
-        self.text_map = {}  # Dictionary to store ID -> text mapping
+        self.index = self._load_or_create_index()
 
-    def _load_index(self):
+    def _load_or_create_index(self):
         """
-        Load the FAISS index from file or initialize a new one if not found.
+        Load an existing Faiss index or create a new one if none exists.
+
+        Returns:
+            faiss.IndexFlatL2: The Faiss index.
         """
-        try:
-            logging.debug(f"Reading FAISS index from {self.index_path}")
-            index = faiss.read_index(self.index_path)
-
-            # Ensure the index is wrapped with IndexIDMap
-            if not isinstance(index, faiss.IndexIDMap):
-                index = faiss.IndexIDMap(index)
-                logging.debug("Index wrapped with IndexIDMap.")
-            logging.debug(f"Loaded FAISS index of type {type(index)}")
-
-            # Load the text map
-            text_map_path = f"{self.index_path}_text_map.pkl"
-            with open(text_map_path, "rb") as f:
-                self.text_map = pickle.load(f)
-            logging.debug(f"Text map loaded from {text_map_path}")
-
-        except Exception:
-            # Initialize a new index and empty text map if files don't exist
-            index = faiss.IndexFlatL2(self.embedding_dim)
-            index = faiss.IndexIDMap(index)
-            self.text_map = {}
-            logging.debug(f"Initialized new FAISS index with dim {self.embedding_dim} and empty text map")
-        return index
+        if os.path.exists(self.vector_db_path):
+            logger.info(f"Loading Faiss index from {self.vector_db_path}")
+            return faiss.read_index(self.vector_db_path)
+        else:
+            logger.info(f"Creating a new Faiss index at {self.vector_db_path}")
+            return faiss.IndexFlatL2(self.embedding_dim)
 
     def save_index(self):
         """
-        Save the FAISS index to the file system.
+        Save the current state of the Faiss index to disk.
         """
-        faiss.write_index(self.index, self.index_path)
-        logging.debug(f"FAISS index saved to {self.index_path}")
+        logger.info(f"Saving Faiss index to {self.vector_db_path}")
+        faiss.write_index(self.index, self.vector_db_path)
 
-        # Save the text map using pickle
-        text_map_path = f"{self.index_path}_text_map.pkl"
-        with open(text_map_path, "wb") as f:
-            pickle.dump(self.text_map, f)
-        logging.debug(f"Text map saved to {text_map_path}")
-
-    def add_embeddings(self, embeddings: np.ndarray, ids: List[int], texts: List[str]):
+    def add_vector(self, embedding):
         """
-        Add multiple embeddings and their IDs to the FAISS index.
+        Add a single embedding (without metadata).
+
+        Args:
+            embedding (np.ndarray): The embedding to add to Faiss.
         """
-        if len(embeddings) != len(ids):
-            raise ValueError("Number of embeddings and IDs must match.")
-        self.index.add_with_ids(embeddings, np.array(ids, dtype=np.int64))
-        for id, text in zip(ids, texts):
-            self.text_map[id] = text
-        self.save_index()
-        logging.debug(f"Added {len(ids)} embeddings to the FAISS index.")
+        try:
+            # Add the embedding to Faiss
+            logger.info(f"Adding a new embedding of dimension {len(embedding)} to Faiss index.")
+            embedding_np = np.array([embedding], dtype=np.float32)  # Faiss expects 2D array
+            logger.info(f"Embedding to be added {embedding_np}.")
+            self.index.add(embedding_np)
 
-    # def search(self, query_embedding: np.ndarray, top_k: int) -> Tuple[np.ndarray, np.ndarray]:
-    #     """
-    #     Search the FAISS index for the nearest neighbors.
-    #     """
-    #     return self.index.search(query_embedding, top_k)
+            # Save Faiss index to persist the change
+            self.save_index()
 
-    def search(self, query_embedding: np.ndarray, top_k: int) -> List[Tuple[int, float, str]]:
-        logging.debug(f"FaissDB.search called with query: {query_embedding}, top_k: {top_k}")
-        distances, indices = self.index.search(query_embedding, top_k)
-        # vector_search_results = self.index.search(query_embedding, top_k)
-        logging.debug(f"FaissDB search returned distances: {distances[0]}, indices: {indices[0]}")
+            # Retrieve assigned ID
+            assigned_id = self.index.ntotal - 1
+            logger.info(f"Successfully added embedding. Assigned ID: {assigned_id}")
+            return assigned_id
+        except Exception as e:
+            logger.exception(f"Error while adding embedding to Faiss index: {str(e)}")
+            raise
 
-        # Load text_map from pickle file
-        text_map_path = f"{self.index_path}_text_map.pkl"
-        with open(text_map_path, "rb") as f:
-            self.text_map = pickle.load(f)
-
-        results = []
-        for idx, dist in zip(indices[0], distances[0]):
-            if idx != -1:
-                text = self.text_map.get(idx, "")
-                print(f"$$$$$$$$$$$$$$ text read for id {idx} was: {text}")
-                results.append((idx, dist, text))
-        logging.debug(f"Results obtained: {results}")
-        return results
-
-    def delete_vectors(self, ids: list):
+    def add_vectors(self, embeddings: np.ndarray):
         """
-        Delete vectors from the FAISS index by their IDs.
+        Add multiple embeddings to the Faiss index.
 
-        :param ids: List of IDs corresponding to the vectors to be removed.
+        Args:
+            embeddings (np.ndarray): A 2D array of embeddings to add.
         """
-        if not isinstance(self.index, faiss.IndexIDMap):
-            raise RuntimeError("The FAISS index is not wrapped with IndexIDMap.")
+        try:
+            logger.info(f"Adding {len(embeddings)} embeddings to Faiss index.")
+            embeddings_np = np.array(embeddings, dtype=np.float32)
+            self.index.add(embeddings_np)
+            self.save_index()
+            logger.info(f"Successfully added {len(embeddings)} embeddings to Faiss index.")
+        except Exception as e:
+            logger.exception(f"Error while adding embeddings to Faiss index: {str(e)}")
+            raise
 
-        # Convert the list of IDs to a numpy array
-        ids_to_remove = np.array(ids, dtype=np.int64)
+    def search_vectors(self, query_vector, top_k):
+        """
+        Search for the top K nearest neighbors of a query vector.
 
-        # Remove IDs from the index
-        self.index.remove_ids(ids_to_remove)
-        self.save_index()
-        # TODO: Delete texts from pickle text_map too
-        logging.debug(f"Deleted {len(ids)} vectors from the FAISS index.")
+        Args:
+            query_vector (np.ndarray): The query embedding.
+            top_k (int): Number of top results to return.
 
+        Returns:
+            tuple: Distances and indices of the nearest neighbors.
+        """
+        logger.info(f"Searching for top {top_k} results using query vector: {query_vector}.")
+        distances, indices = self.index.search(query_vector, top_k)
+        logger.info(f"Search results found the following indices: {indices}")
+        logger.info(f"Search results found the following distances: {distances}")
+        return distances, indices
 
-# # app/core/faiss_db.py
-# # Handles Faiss operations like indexing and searching.
+    def get_all_vectors(self):
+        """
+        Retrieve all vector embeddings from the Faiss index.
 
-# import faiss
-# import numpy as np
-# from typing import List, Tuple
+        Returns:
+            List[np.ndarray]: A list of all embeddings in the index.
+        """
+        try:
+            vectors = []
+            for i in range(self.index.ntotal):  # Loop through all vectors in Faiss
+                vectors.append({"id": i})
+            return vectors
+        except Exception as e:
+            logger.error(f"Error while retrieving all vectors: {e}")
+            raise
 
-# # class FaissDB:
-# #     def __init__(self, index_path: str, embedding_dim: int):
-# #         self.index_path = index_path
-# #         self.embedding_dim = embedding_dim
-# #         self.index = self._load_index()
+    def get_vector_by_id(self, vector_id: int):
+        try:
+            logger.info(f"Attempting to retrieve vector ID {vector_id}")
 
-# #     def _load_index(self):
-# #         try:
-# #             print(f"$$$$$$$$$$$$ Reading index with embeddings of {self.embedding_dim}")
-# #             index = faiss.read_index(self.index_path)
-# #             print(f"$$$$$$$$$$$$ Index read successfully of type {type(index)}")
-# #             if not isinstance(index, faiss.IndexIDMap):
-# #                 # Wrap it with IndexIDMap if it's not already
-# #                 print(f"Index loaded from {self.index_path}, wrapping it with IndexIDMap.")
-# #                 index = faiss.IndexIDMap(index)
-# #             print(f"Loaded FAISS index of type {type(index)} from {self.index_path}")
-# #         except Exception as e:
-# #             print(f"Exception {str(e)} occurred")
-# #             index = faiss.IndexFlatL2(self.embedding_dim)  # Create a new index
-# #             index = faiss.IndexIDMap(index)  # Wrap it with IndexIDMap
-# #             print(f"Initialized new FAISS index with dim {self.embedding_dim}")
-# #         return index
+            # Check if vector_id is within the valid range
+            if vector_id < 0 or vector_id >= self.index.ntotal:
+                logger.error(f"Vector ID {vector_id} is out of range. Valid range is 0 to {self.index.ntotal - 1}.")
+                return None
 
-# class FaissDB:
-#     def __init__(self, index_path="./data/faiss_index", embedding_dim=384):
-#         self.index_path = index_path
-#         self.embedding_dim = embedding_dim
-#         self.index = self._load_index()
+            # Fetch the vector embedding
+            embedding = self.index.reconstruct(vector_id)
+            return embedding
+        except ValueError as ve:
+            logger.error(f"Validation error: {str(ve)}")
+            raise
+        except Exception as e:
+            logger.exception(f"Unexpected error while retrieving vector ID {vector_id}: {str(e)}")
+            raise
 
-#     def _load_index(self):
-#         try:
-#             print(f"$$$$$$$$$$$$ Reading index with embeddings of {self.embedding_dim}")
-#             index = faiss.read_index(self.index_path)
-#             print(f"$$$$$$$$$$$$ Index read successfully of type {type(index)}")
-#             if isinstance(index, faiss.IndexIDMap):
-#                 print("Index is already an IndexIDMap.")
-#             else:
-#                 # Ensure the index is wrapped if not already
-#                 print("Index is not an IndexIDMap. Wrapping it.")
-#                 index = faiss.IndexIDMap(index)
-#             print(f"Loaded FAISS index of type {type(index)} from {self.index_path}")
-#         except Exception as e:
-#             print(f"Exception {str(e)} occurred")
-#             index = faiss.IndexFlatL2(self.embedding_dim)  # Create a new flat index
-#             index = faiss.IndexIDMap(index)  # Wrap it with IndexIDMap
-#             print(f"Initialized new FAISS index with dim {self.embedding_dim}")
-#         return index
+    def get_vector_by_position(self, position: int):
+        """
+        Retrieve a vector by its position in the Faiss index.
 
-#     def save_index(self):
-#         print(f"index: {self.index}; index path: {self.index_path}")
-#         faiss.write_index(self.index, self.index_path)
+        Args:
+            position (int): The position of the vector in the index.
 
-#     def add_embeddings(self, embeddings, ids):
-#         """
-#         Add embeddings and their IDs to the FAISS index.
-#         """
-#         print(f"Adding embeddings of shape {embeddings.shape}")
-#         if isinstance(self.index, faiss.IndexIDMap):
-#             self.index.add_with_ids(embeddings, np.array(ids, dtype=np.int64))
-#         else:
-#             raise RuntimeError("The FAISS index is not wrapped with IndexIDMap.")
-#         self.save_index()
-#         print(f"Added {len(ids)} embeddings to the FAISS index.")
+        Returns:
+            np.ndarray: The vector embedding.
+        """
+        try:
+            if position < 0 or position >= self.index.ntotal:
+                logger.error(f"Position {position} is out of range.")
+                return None
+            return self.index.reconstruct(position)
+        except Exception as e:
+            logger.exception(f"Error while retrieving vector by position {position}: {str(e)}")
+            raise
 
-#     # def add_embeddings(self, embeddings: np.ndarray, ids: List[str]):
-#     #     id_map = faiss.IndexIDMap(self.index)
-#     #     id_map.add_with_ids(embeddings, np.array(ids, dtype=np.int64))
+    def clear_index(self):
+        """
+        Clear all embeddings from the Faiss index.
+        """
+        try:
+            logger.info("Clearing all embeddings from the Faiss index.")
+            self.index.reset()
+            self.save_index()
+            logger.info("Successfully cleared the Faiss index.")
+        except Exception as e:
+            logger.exception(f"Error while clearing the Faiss index: {str(e)}")
+            raise
 
-#     def search(self, query_embedding: np.ndarray, top_k: int) -> List[Tuple[int, float]]:
-#         distances, indices = self.index.search(query_embedding, top_k)
-#         return list(zip(indices[0], distances[0]))

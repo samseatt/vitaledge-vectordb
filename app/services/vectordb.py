@@ -49,82 +49,110 @@ distances, indices = service.search_vectors(query_vector=[0.1, 0.2, 0.3], k=5)
 """
 
 import numpy as np
+from typing import Optional, List
 from app.core.faiss_db import FaissDB
-from app.core.config import config
+from app.core.sqlite_db import SQLiteDB
+from app.core.weaviate_db import WeaviateDB
+import logging
 
-class FaissService:
-    def __init__(self):
-        self.faiss_db = FaissDB(config.VECTOR_DB_PATH, config.EMBEDDING_DIM)
+logger = logging.getLogger(__name__)
 
-    def add_vectors(self, embeddings: np.ndarray, ids: list, texts: str):
+class VectorDBService:
+    def __init__(self, faiss_db: FaissDB, sqlite_db: SQLiteDB, weaviate_db: WeaviateDB = None):
+        self.faiss_db = faiss_db
+        self.sqlite_db = sqlite_db
+        self.weaviate_db = weaviate_db  # Optional for future use
+
+    def add_vector(self, embedding: list, text: str, external_id: Optional[str] = None, category: Optional[str] = None, tags: List[str] = None) -> int:
         """
-        Add vectors to the database.
+        Adds a vector embedding and its metadata.
+
+        Args:
+            embedding (list): The embedding to add.
+            text (str): Metadata text associated with the embedding.
+            external_id (Optional[str]): External identifier for the vector.
+            category (Optional[str]): Category of the vector.
+            tags (List[str]): Associated tags.
+
+        Returns:
+            int: The ID of the added vector.
         """
-        self.faiss_db.add_embeddings(embeddings, ids, texts)
+        try:
+            # Add embedding to Faiss and retrieve the assigned embed_id
+            logger.info(f"Adding vector metadata to faiss for text: {text}")
+            embed_id = self.faiss_db.add_vector(np.array(embedding, dtype=np.float32))
 
-    def search_vectors(self, query_vector: np.ndarray, top_k: int):
+            # Insert metadata into SQLite and retrieve the vector_id
+            logger.info(f"Adding vector metadata to sqlite for embedding id: {embed_id}")
+            vector_id = self.sqlite_db.add_vector(text, embed_id, external_id, category, tags or [])
+
+            logger.info(f"Vector addition succeeded with vector_id {vector_id}, and embed_id: {embed_id}")
+            return vector_id
+        except Exception as e:
+            logger.exception(f"Error while adding vector: {str(e)}")
+            raise
+
+        # logger.info(f"Called add_vector for text: {text}")
+        # logger.info(f"Adding vector metadata to sqlite for: {text}")
+        # vector_id = self.sqlite_db.add_vector(text, external_id, category, tags or [])
+        # logger.info(f"Adding vector metadata to faiss for: {vector_id}")
+        # self.faiss_db.add_vector(embedding)
+        # logger.info(f"Vector added successfully: {vector_id}")
+        # # self.sqlite_db.add_vector(text, external_id, category, tags or [])
+        # return vector_id
+
+    """
+    Author: Sam Seatt
+    List vectors from sqlite
+    """
+    def list_vectors(self, category: Optional[str] = None):
+        return self.sqlite_db.get_vectors(category)
+
+    """
+    Author: Sam Seatt
+    List all the meta tags in a database
+    """
+    def list_tags(self):
+        return self.sqlite_db.get_tags()
+    
+    def search_vectors(self, query_vector, top_k: int) -> List[dict]:
         """
-        Search the database for the nearest neighbors.
+        Searches for similar vectors in the Faiss index and retrieves enriched metadata.
+
+        Args:
+            query_vector (list): The query embedding.
+            top_k (int): Number of top results to return.
+
+        Returns:
+            List[dict]: Search results including distances, Faiss IDs, and metadata.
         """
-        return self.faiss_db.search(query_vector, top_k)
+        query_np = np.array([query_vector], dtype=np.float32)
+        distances, indices = self.faiss_db.search_vectors(query_np, top_k)
+        results = []
+        for idx, dist in zip(indices[0], distances[0]):
+            if idx == -1:
+                continue  # Skip invalid results
 
-    def delete_vectors(self, ids: list):
+            # Retrieve metadata from SQLite
+            logger.info(f"Getting metadata form sqlite for id: {idx}")
+            metadata = self.sqlite_db.get_metadata(idx)  # Updated to enrich metadata
+            results.append({
+                "id": idx,  # Faiss ID
+                "distance": dist,
+                "metadata": metadata  # Enriched with text, external_id, tags
+            })
+
+        return results
+
+    def get_vector(self, vector_id: int):
         """
-        Delete vectors to the database.
+        Service method to retrieve a vector without metadata.
         """
-        self.faiss_db.delete_vectors(ids)
-
-
-
-# import faiss
-# import os
-# import numpy as np
-
-# # Configuration for Faiss index
-# INDEX_PATH = "data/faiss_index.idx"
-# VECTOR_DIM = 384  # Example for all-MiniLM-L6-v2
-# USE_GPU = False  # Update to True if GPU is available
-
-# class FaissService:
-#     def __init__(self):
-#         # Initialize Faiss index
-#         # self.index = None
-#         # self.load_index()
-#         self.dimension = 384  # Replace with the actual dimension of your embeddings
-#         index = faiss.IndexFlatL2(self.dimension)
-#         self.index = faiss.IndexIDMap(index)  # Wrap it to allow ID assignment
-        
-#     def create_index(self):
-#         """Create a new Faiss index."""
-#         if USE_GPU:
-#             res = faiss.StandardGpuResources()
-#             self.index = faiss.index_factory(VECTOR_DIM, "Flat", faiss.METRIC_INNER_PRODUCT)
-#             self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
-#         else:
-#             self.index = faiss.IndexFlatIP(VECTOR_DIM)
-
-#     def add_vectors(self, vectors: np.ndarray, ids: np.ndarray):
-#         """Add vectors with IDs to the index."""
-#         if self.index is None:
-#             self.create_index()
-#         self.index.add_with_ids(vectors, ids)
-#         self.save_index()
-
-#     def search_vectors(self, query_vector: np.ndarray, k: int = 5):
-#         """Search for the nearest neighbors to a query vector."""
-#         if self.index is None:
-#             raise ValueError("Index is not initialized.")
-#         distances, indices = self.index.search(query_vector, k)
-#         return distances, indices
-
-#     def save_index(self):
-#         """Save the Faiss index to disk."""
-#         if self.index is not None:
-#             faiss.write_index(self.index, INDEX_PATH)
-
-#     def load_index(self):
-#         """Load the Faiss index from disk."""
-#         if os.path.exists(INDEX_PATH):
-#             self.index = faiss.read_index(INDEX_PATH)
-#         else:
-#             self.create_index()
+        try:
+            logger.info(f"Embedding requested for vector ID {vector_id}")
+            embedding = self.faiss_db.get_vector_by_id(vector_id)
+            return embedding
+        except ValueError as ve:
+            raise ve
+        except Exception as e:
+            raise RuntimeError(f"Error fetching vector {vector_id}: {str(e)}") from e
