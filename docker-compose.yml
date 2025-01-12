@@ -1,0 +1,14 @@
+version: "3.9"
+services:
+  vectordb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vitaledge-vectordb
+    ports:
+      - "8008:8000"  # Host port 8008 mapped to container's 8000
+    volumes:
+      - "./data:/app/data"  # Persist Faiss index and SQLite data files outside the container
+    environment:
+      - PYTHONUNBUFFERED=1  # Ensure Python outputs logs in real-time
+    restart: unless-stopped
